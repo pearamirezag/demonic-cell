@@ -129,9 +129,10 @@ registerProcessor('lockhart-wavefolder', class extends AudioWorkletProcessor {
 
   static get parameterDescriptors() {
     return [
-      { name: 'drive',  defaultValue: 3.0, minValue: 0.1,  maxValue: 12.0 },
-      { name: 'offset', defaultValue: 0.0, minValue: -4.0, maxValue:  4.0 },
-      { name: 'vol',    defaultValue: 0.4, minValue: 0.0,  maxValue:  1.0 },
+      { name: 'drive',  defaultValue: 3.0,    minValue: 0.1,  maxValue: 12.0   },
+      { name: 'offset', defaultValue: 0.0,    minValue: -4.0, maxValue:  4.0   },
+      { name: 'filter', defaultValue: 4000.0, minValue: 20.0, maxValue: 20000.0 },
+      { name: 'vol',    defaultValue: 0.4,    minValue: 0.0,  maxValue:  1.0   },
     ];
   }
 
@@ -150,6 +151,9 @@ registerProcessor('lockhart-wavefolder', class extends AudioWorkletProcessor {
 
     // Feedback state — small nonzero to seed oscillation
     this.fbVal = 0.1;
+
+    // One-pole lowpass state
+    this.lpY = 0;
 
     // DC blocker state
     this.dcx = 0;
@@ -205,6 +209,14 @@ registerProcessor('lockhart-wavefolder', class extends AudioWorkletProcessor {
     return (isNaN(out) || !isFinite(out)) ? 0.0 : out;
   }
 
+  // One-pole lowpass filter in feedback path
+  // y[n] = y[n-1] + a * (x[n] - y[n-1])  where a = 1 - exp(-2π * fc / sr)
+  lpFilter(x, fc) {
+    const a = 1.0 - Math.exp(-2.0 * Math.PI * fc / sampleRate);
+    this.lpY += a * (x - this.lpY);
+    return this.lpY;
+  }
+
   // One-pole DC blocker
   dcBlock(x) {
     this.dcy = x - this.dcx + 0.9999 * this.dcy;
@@ -216,15 +228,18 @@ registerProcessor('lockhart-wavefolder', class extends AudioWorkletProcessor {
     const out     = outputs[0][0];
     const driveP  = parameters.drive;
     const offsetP = parameters.offset;
+    const filterP = parameters.filter;
     const volP    = parameters.vol;
 
     for (let i = 0; i < out.length; i++) {
       const drive  = driveP.length  > 1 ? driveP[i]  : driveP[0];
       const offset = offsetP.length > 1 ? offsetP[i] : offsetP[0];
+      const fc     = filterP.length > 1 ? filterP[i] : filterP[0];
       const vol    = volP.length    > 1 ? volP[i]    : volP[0];
 
-      // Cascade: feedback → drive → offset → fold×3 → scale → tanh → dc block
-      let x = this.fbVal * drive + offset;
+      // Cascade: feedback → filter → drive → offset → fold×3 → scale → tanh → dc block
+      let x = this.lpFilter(this.fbVal, fc);
+      x = x * drive + offset;
       x = this.fold(x, this.cells[0]);
       x = this.fold(x, this.cells[1]);
       x = this.fold(x, this.cells[2]);
@@ -259,6 +274,14 @@ registerProcessor('lockhart-wavefolder', class extends AudioWorkletProcessor {
       <span class="param-value" id="offset-val">0.00</span>
     </div>
     <input type="range" id="offset" min="-4" max="4" step="0.02" value="0">
+  </div>
+
+  <div class="param">
+    <div class="param-header">
+      <span class="param-name">filter</span>
+      <span class="param-value" id="filter-val">4000 hz</span>
+    </div>
+    <input type="range" id="filter" min="20" max="20000" step="10" value="4000">
   </div>
 
   <div class="param">
@@ -314,9 +337,8 @@ registerProcessor('lockhart-wavefolder', class extends AudioWorkletProcessor {
     node.connect(masterGain);
 
     // sync initial param values from sliders
-    ['drive', 'offset', 'vol'].forEach(id => {
-      const param = id === 'vol' ? 'vol' : id;
-      node.parameters.get(param).value = parseFloat(document.getElementById(id).value);
+    ['drive', 'offset', 'filter', 'vol'].forEach(id => {
+      node.parameters.get(id).value = parseFloat(document.getElementById(id).value);
     });
 
     initialized = true;
@@ -358,6 +380,15 @@ registerProcessor('lockhart-wavefolder', class extends AudioWorkletProcessor {
   bindSlider('drive',  'drive',  'drive-val',  1);
   bindSlider('offset', 'offset', 'offset-val', 2);
   bindSlider('vol',    'vol',    'vol-val',    2);
+
+  // Filter slider — display in Hz with k suffix above 1000
+  const filterSlider  = document.getElementById('filter');
+  const filterDisplay = document.getElementById('filter-val');
+  filterSlider.addEventListener('input', () => {
+    const v = parseFloat(filterSlider.value);
+    filterDisplay.textContent = v >= 1000 ? (v / 1000).toFixed(1) + ' khz' : Math.round(v) + ' hz';
+    if (node) node.parameters.get('filter').value = v;
+  });
 
   // Spectrum visualiser
   const canvas    = document.getElementById('vis');
