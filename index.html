@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>demonic cell</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #0a0a0a;
+      color: #d8d8d8;
+      font-family: 'Courier New', monospace;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem 1.5rem;
+      gap: 0;
+    }
+    h1 {
+      font-size: 0.85rem;
+      font-weight: normal;
+      letter-spacing: 0.25em;
+      text-transform: lowercase;
+      color: #d8d8d8;
+      margin-bottom: 0.3rem;
+    }
+    h2 {
+      font-size: 0.65rem;
+      font-weight: normal;
+      letter-spacing: 0.1em;
+      color: #3a3a3a;
+      margin-bottom: 2.5rem;
+    }
+    .controls {
+      width: 100%;
+      max-width: 440px;
+      display: flex;
+      flex-direction: column;
+      gap: 1.6rem;
+    }
+    .param {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+    .param-header {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.7rem;
+      letter-spacing: 0.12em;
+      text-transform: lowercase;
+    }
+    .param-name { color: #666; }
+    .param-value { color: #d8d8d8; }
+    input[type=range] {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 100%;
+      height: 1px;
+      background: #2a2a2a;
+      outline: none;
+      cursor: pointer;
+    }
+    input[type=range]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #444;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    input[type=range].on::-webkit-slider-thumb { background: #7dff9a; }
+    input[type=range]::-moz-range-thumb {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #444;
+      border: none;
+      cursor: pointer;
+    }
+    .btn-row {
+      display: flex;
+      gap: 0.75rem;
+      width: 100%;
+      max-width: 440px;
+    }
+    button {
+      background: none;
+      border: 1px solid #2a2a2a;
+      color: #555;
+      font-family: 'Courier New', monospace;
+      font-size: 0.7rem;
+      letter-spacing: 0.2em;
+      text-transform: lowercase;
+      padding: 0.7rem 1rem;
+      cursor: pointer;
+      transition: border-color 0.15s, color 0.15s;
+      flex: 1;
+    }
+    button:hover { border-color: #555; color: #aaa; }
+    #play-btn.on { border-color: #7dff9a; color: #7dff9a; }
+    #kick-btn:active { border-color: #fff; color: #fff; }
+    canvas {
+      width: 100%;
+      max-width: 440px;
+      height: 100px;
+      margin-top: 1.8rem;
+      display: block;
+      background: #0a0a0a;
+    }
+    .note {
+      margin-top: 2rem;
+      font-size: 0.6rem;
+      color: #2a2a2a;
+      letter-spacing: 0.06em;
+      max-width: 440px;
+      line-height: 1.8;
+    }
+  </style>
+</head>
+<body>
+
+<!-- AudioWorklet processor — not executed by browser (custom type) -->
+<script type="lockhart-worklet">
+registerProcessor('lockhart-wavefolder', class extends AudioWorkletProcessor {
+
+  static get parameterDescriptors() {
+    return [
+      { name: 'drive',  defaultValue: 3.0, minValue: 0.1,  maxValue: 12.0 },
+      { name: 'offset', defaultValue: 0.0, minValue: -4.0, maxValue:  4.0 },
+      { name: 'vol',    defaultValue: 0.4, minValue: 0.0,  maxValue:  1.0 },
+    ];
+  }
+
+  constructor() {
+    super();
+
+    // Lockhart circuit constants (Serge wavefolder values)
+    const RL = 7.5e3, R = 15e3, VT = 26e-3, Is = 10e-16;
+    this.a  = 2 * RL / R;
+    this.b  = (R + 2 * RL) / (VT * R);
+    this.d  = (RL * Is) / VT;
+    this.VT = VT;
+
+    // Three ADAA Lockhart cells, each with independent state
+    this.cells = Array.from({ length: 3 }, () => ({ Ln1: 0, Fn1: 0, xn1: 0 }));
+
+    // Feedback state — small nonzero to seed oscillation
+    this.fbVal = 0.1;
+
+    // DC blocker state
+    this.dcx = 0;
+    this.dcy = 0;
+
+    // Listen for kick message from main thread
+    this.port.onmessage = (e) => {
+      if (e.data === 'kick') this.fbVal = 1.0;
+      if (e.data === 'reset') { this.fbVal = 0.001; this.dcx = 0; this.dcy = 0; }
+    };
+  }
+
+  // Lambert W via Halley's method (warm-started from previous value)
+  lambertW(x, w0) {
+    let w = (Math.abs(w0) > 1e-12) ? w0 : (x > 1.0 ? Math.log(x + 1.0) : x * 0.5);
+    for (let i = 0; i < 30; i++) {
+      const ew    = Math.exp(Math.min(w, 500));
+      const p     = w * ew - x;
+      const r     = (w + 1) * ew;
+      const denom = r - p * (w + 2) / (2 * (w + 1));
+      if (Math.abs(denom) < 1e-30) break;
+      const err = p / denom;
+      w -= err;
+      if (Math.abs(err) < 1e-9) break;
+    }
+    return w;
+  }
+
+  // Single ADAA Lockhart cell
+  fold(x, cell) {
+    const { a, b, d, VT } = this;
+    const l  = x >= 0 ? 1 : -1;
+    const u  = d * Math.exp(Math.min(l * b * x, 500));
+    const Ln = this.lambertW(u, cell.Ln1);
+    const Fn = (0.5 * VT / b) * (Ln * (Ln + 2)) - 0.5 * a * x * x;
+
+    let out;
+    if (Math.abs(x - cell.xn1) < 1e-9) {
+      // ill-conditioned: evaluate at midpoint
+      const xm = 0.5 * (x + cell.xn1);
+      const um = d * Math.exp(Math.min(l * b * xm, 500));
+      const Lm = this.lambertW(um, cell.Ln1);
+      out = l * VT * Lm - a * xm;
+    } else {
+      // ADAA: finite difference of antiderivative
+      out = (Fn - cell.Fn1) / (x - cell.xn1);
+    }
+
+    cell.Ln1 = Ln;
+    cell.Fn1 = Fn;
+    cell.xn1 = x;
+
+    return (isNaN(out) || !isFinite(out)) ? 0.0 : out;
+  }
+
+  // One-pole DC blocker
+  dcBlock(x) {
+    this.dcy = x - this.dcx + 0.9999 * this.dcy;
+    this.dcx = x;
+    return this.dcy;
+  }
+
+  process(inputs, outputs, parameters) {
+    const out     = outputs[0][0];
+    const driveP  = parameters.drive;
+    const offsetP = parameters.offset;
+    const volP    = parameters.vol;
+
+    for (let i = 0; i < out.length; i++) {
+      const drive  = driveP.length  > 1 ? driveP[i]  : driveP[0];
+      const offset = offsetP.length > 1 ? offsetP[i] : offsetP[0];
+      const vol    = volP.length    > 1 ? volP[i]    : volP[0];
+
+      // Cascade: feedback → drive → offset → fold×3 → scale → tanh → dc block
+      let x = this.fbVal * drive + offset;
+      x = this.fold(x, this.cells[0]);
+      x = this.fold(x, this.cells[1]);
+      x = this.fold(x, this.cells[2]);
+      x *= 0.333;
+      x  = Math.tanh(x);
+      x  = this.dcBlock(x);
+
+      this.fbVal = x;
+      out[i] = x * vol;
+    }
+    return true;
+  }
+});
+</script>
+
+<h1>demonic cell</h1>
+<h2>antialiased lockhart wavefolder cascade — pedro a. ramírez</h2>
+
+<div class="controls">
+
+  <div class="param">
+    <div class="param-header">
+      <span class="param-name">drive</span>
+      <span class="param-value" id="drive-val">3.0</span>
+    </div>
+    <input type="range" id="drive" min="0.1" max="12" step="0.05" value="3">
+  </div>
+
+  <div class="param">
+    <div class="param-header">
+      <span class="param-name">offset</span>
+      <span class="param-value" id="offset-val">0.00</span>
+    </div>
+    <input type="range" id="offset" min="-4" max="4" step="0.02" value="0">
+  </div>
+
+  <div class="param">
+    <div class="param-header">
+      <span class="param-name">volume</span>
+      <span class="param-value" id="vol-val">0.40</span>
+    </div>
+    <input type="range" id="vol" min="0" max="1" step="0.01" value="0.4">
+  </div>
+
+</div>
+
+<div class="btn-row">
+  <button id="play-btn">▶ play</button>
+  <button id="kick-btn">impulse</button>
+</div>
+
+<canvas id="vis" width="880" height="200"></canvas>
+
+<p class="note">
+  three-stage cascade of antialiased lockhart wavefolder cells (adaa, first order) in self-oscillating feedback.<br>
+  drive navigates fold complexity — offset shifts fold symmetry — impulse reinjects energy.
+</p>
+
+<script>
+  const audioCtx   = new AudioContext();
+  const masterGain = audioCtx.createGain();
+  masterGain.connect(audioCtx.destination);
+
+  const analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 2048;
+  masterGain.connect(analyser);
+  const bufLen  = analyser.frequencyBinCount;
+  const dataArr = new Uint8Array(bufLen);
+
+  let node        = null;
+  let isPlaying   = false;
+  let initialized = false;
+  let animFrame   = null;
+
+  const playBtn = document.getElementById('play-btn');
+  const kickBtn = document.getElementById('kick-btn');
+
+  async function init() {
+    if (audioCtx.state === 'suspended') await audioCtx.resume();
+
+    const src  = document.querySelector('script[type="lockhart-worklet"]').textContent;
+    const blob = new Blob([src], { type: 'application/javascript' });
+    const url  = URL.createObjectURL(blob);
+    await audioCtx.audioWorklet.addModule(url);
+
+    node = new AudioWorkletNode(audioCtx, 'lockhart-wavefolder');
+    node.connect(masterGain);
+
+    // sync initial param values from sliders
+    ['drive', 'offset', 'vol'].forEach(id => {
+      const param = id === 'vol' ? 'vol' : id;
+      node.parameters.get(param).value = parseFloat(document.getElementById(id).value);
+    });
+
+    initialized = true;
+  }
+
+  playBtn.addEventListener('click', async () => {
+    if (!initialized) await init();
+
+    if (!isPlaying) {
+      isPlaying = true;
+      playBtn.textContent = '◼ stop';
+      playBtn.classList.add('on');
+      document.querySelectorAll('input[type=range]').forEach(s => s.classList.add('on'));
+      drawVis();
+    } else {
+      isPlaying = false;
+      playBtn.textContent = '▶ play';
+      playBtn.classList.remove('on');
+      document.querySelectorAll('input[type=range]').forEach(s => s.classList.remove('on'));
+      if (animFrame) cancelAnimationFrame(animFrame);
+      node.port.postMessage('reset');
+    }
+  });
+
+  kickBtn.addEventListener('click', () => {
+    if (node) node.port.postMessage('kick');
+  });
+
+  function bindSlider(id, paramName, displayId, decimals) {
+    const slider  = document.getElementById(id);
+    const display = document.getElementById(displayId);
+    slider.addEventListener('input', () => {
+      const v = parseFloat(slider.value);
+      display.textContent = v.toFixed(decimals);
+      if (node) node.parameters.get(paramName).value = v;
+    });
+  }
+
+  bindSlider('drive',  'drive',  'drive-val',  1);
+  bindSlider('offset', 'offset', 'offset-val', 2);
+  bindSlider('vol',    'vol',    'vol-val',    2);
+
+  // Spectrum visualiser
+  const canvas    = document.getElementById('vis');
+  const canvasCtx = canvas.getContext('2d');
+
+  function drawVis() {
+    if (!isPlaying) return;
+    animFrame = requestAnimationFrame(drawVis);
+
+    analyser.getByteFrequencyData(dataArr);
+    canvasCtx.fillStyle = '#0a0a0a';
+    canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
+
+    const useBins = Math.floor(bufLen * 0.6); // show up to ~12kHz
+    const barW    = canvas.width / useBins;
+
+    for (let i = 0; i < useBins; i++) {
+      const v = dataArr[i] / 255;
+      const h = v * v * canvas.height;
+      const g = Math.floor(v * 180);
+      canvasCtx.fillStyle = `rgb(${Math.floor(g * 0.4)}, ${g}, ${Math.floor(g * 0.5)})`;
+      canvasCtx.fillRect(i * barW, canvas.height - h, barW - 0.5, h);
+    }
+  }
+</script>
+
+</body>
+</html>
