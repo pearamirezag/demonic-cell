@@ -400,7 +400,7 @@ registerProcessor('lockhart-wavefolder', class extends AudioWorkletProcessor {
 
   // Analyser for both visualizers
   const analyser = audioCtx.createAnalyser();
-  analyser.fftSize = 2048;
+  analyser.fftSize = 512;
   masterGain.connect(analyser);
   window.analyser = analyser; // console access for live tweaking
   // allocated dynamically per frame so fftSize changes take effect immediately
@@ -437,12 +437,14 @@ registerProcessor('lockhart-wavefolder', class extends AudioWorkletProcessor {
       playBtn.textContent = 'Stop';
       playBtn.classList.add('on');
       document.querySelectorAll('input[type=range]').forEach(s => s.classList.add('on'));
+      masterGain.gain.linearRampToValueAtTime(1, audioCtx.currentTime + 0.02);
       drawVis();
     } else {
       isPlaying = false;
       playBtn.textContent = 'Play';
       playBtn.classList.remove('on');
       document.querySelectorAll('input[type=range]').forEach(s => s.classList.remove('on'));
+      masterGain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.02);
       if (animFrame) cancelAnimationFrame(animFrame);
       node.port.postMessage('reset');
     }
