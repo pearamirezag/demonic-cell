@@ -402,6 +402,7 @@ registerProcessor('lockhart-wavefolder', class extends AudioWorkletProcessor {
   const analyser = audioCtx.createAnalyser();
   analyser.fftSize = 2048;
   masterGain.connect(analyser);
+  window.analyser = analyser; // console access for live tweaking
   const freqData  = new Uint8Array(analyser.frequencyBinCount);
   const timeData  = new Uint8Array(analyser.fftSize);
 
