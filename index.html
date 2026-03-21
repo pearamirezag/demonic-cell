@@ -403,8 +403,7 @@ registerProcessor('lockhart-wavefolder', class extends AudioWorkletProcessor {
   analyser.fftSize = 2048;
   masterGain.connect(analyser);
   window.analyser = analyser; // console access for live tweaking
-  const freqData  = new Uint8Array(analyser.frequencyBinCount);
-  const timeData  = new Uint8Array(analyser.fftSize);
+  // allocated dynamically per frame so fftSize changes take effect immediately
 
   let node        = null;
   let isPlaying   = false;
@@ -487,6 +486,7 @@ registerProcessor('lockhart-wavefolder', class extends AudioWorkletProcessor {
   const BAR    = '#333333';
 
   function drawScope(W, H) {
+    const timeData = new Uint8Array(analyser.fftSize);
     analyser.getByteTimeDomainData(timeData);
 
     scopeCtx.fillStyle = '#ffffff';
@@ -523,6 +523,7 @@ registerProcessor('lockhart-wavefolder', class extends AudioWorkletProcessor {
   }
 
   function drawSpectrum(W, H) {
+    const freqData = new Uint8Array(analyser.frequencyBinCount);
     analyser.getByteFrequencyData(freqData);
 
     specCtx.fillStyle = '#ffffff';
